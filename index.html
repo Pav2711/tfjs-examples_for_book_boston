@@ -1,0 +1,507 @@
+<!--
+Copyright 2018 Google LLC. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================
+-->
+
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.0.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-vis@1.0.2/dist/tfjs-vis.umd.min.js"></script>
+  
+
+  
+  <style>
+    .negativeWeight {
+      color: #cc0000;
+    }
+
+    .positiveWeight {
+      color: #00aa00;
+    }
+
+    #buttons {
+      margin-top: 20px;
+      padding: 5px;
+    }
+
+    #oneHidden {
+      border-left: 1px solid #ededed;
+      border-right: 1px solid #ededed;
+    }
+
+    #linear,
+    #oneHidden,
+    #twoHidden {
+      padding: 5px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class='tfjs-example-container centered-container'>
+    <section class='title-area'>
+      <h1>Multivariate Regression</h1>
+      <p class='subtitle'>Compare different models for housing price prediction.</p>
+    </section>
+
+    <section>
+      <p class='section-head'>Description</p>
+      <p>
+        This example shows you how to perform regression with more than one input feature using the
+        <a href="https://www.cs.toronto.edu/~delve/data/boston/bostonDetail.html">Boston Housing Dataset</a>,
+        which is a famous dataset derived from information collected by the U.S. Census Service concerning housing
+        in the area of Boston Massachusetts.
+      </p>
+      <p>
+        It allows you to compare the performance of 3 different models for predicting the house prices. When training
+        the linear model, it will also display the largest 5 weights (by absolute value) of the model and
+        the feature associated with each of those weights.
+      </p>
+    </section>
+
+    <section>
+      <p class='section-head'>Status</p>
+      <p id="status">Loading data...</p>
+      <p id="baselineStatus">Baseline not computed...</p>
+    </section>
+
+    <section>
+      <p class='section-head'>Training Progress</p>
+      <div class="with-cols">
+        <div id="linear">
+          <div class="chart"></div>
+          <div class="status"></div>
+          <div id="modelInspectionOutput">
+            <p id="inspectionHeadline"></p>
+            <table id="myTable"></table>
+          </div>
+        </div>
+        <div id="oneHidden">
+          <div class="chart"></div>
+          <div class="status"></div>
+        </div>
+        <div id="twoHidden">
+          <div class="chart"></div>
+          <div class="status"></div>
+        </div>
+      </div>
+
+      <div id="buttons">
+        <div class="with-cols">
+          <button id="simple-mlr">Train Linear Regressor</button>
+          <button id="nn-mlr-1hidden">Train Neural Network Regressor (1 hidden layer)</button>
+          <button id="nn-mlr-2hidden">Train Neural Network Regressor (2 hidden layers)</button>
+        </div>
+      </div>
+
+    </section>
+  </div>
+  
+
+  <script src= "https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+  <script>
+  
+
+// Some hyperparameters for model training.
+const NUM_EPOCHS = 200;
+const BATCH_SIZE = 40;
+const LEARNING_RATE = 0.01;
+
+
+// Boston Housing data constants:
+const BASE_URL =
+    'https://storage.googleapis.com/tfjs-examples/multivariate-linear-regression/data/';
+
+const TRAIN_FEATURES_FN = 'train-data.csv';
+const TRAIN_TARGET_FN = 'train-target.csv';
+const TEST_FEATURES_FN = 'test-data.csv';
+const TEST_TARGET_FN = 'test-target.csv';
+
+
+function determineMeanAndStddev(data) {
+  const dataMean = data.mean(0);
+  // TODO(bileschi): Simplify when and if tf.var / tf.std added to the API.
+  const diffFromMean = data.sub(dataMean);
+  const squaredDiffFromMean = diffFromMean.square();
+  const variance = squaredDiffFromMean.mean(0);
+  const dataStd = variance.sqrt();
+  return {dataMean, dataStd};
+}
+
+/**
+ * Given expected mean and standard deviation, normalizes a dataset by
+ * subtracting the mean and dividing by the standard deviation.
+ *
+ * @param {Tensor2d} data: Data to normalize. Shape: [batch, numFeatures].
+ * @param {Tensor1d} dataMean: Expected mean of the data. Shape [numFeatures].
+ * @param {Tensor1d} dataStd: Expected std of the data. Shape [numFeatures]
+ *
+ * @returns {Tensor2d}: Tensor the same shape as data, but each column
+ * normalized to have zero mean and unit standard deviation.
+ */
+ function normalizeTensor(data, dataMean, dataStd) {
+  return data.sub(dataMean).div(dataStd);
+}
+
+
+ const statusElement = document.getElementById('status');
+ function updateStatus(message) {
+  statusElement.innerText = message;
+};
+
+const baselineStatusElement = document.getElementById('baselineStatus');
+ function updateBaselineStatus(message) {
+  baselineStatusElement.innerText = message;
+};
+
+ function updateModelStatus(message, modelName) {
+  const statElement = document.querySelector(`#${modelName} .status`);
+  statElement.innerText = message;
+};
+
+const NUM_TOP_WEIGHTS_TO_DISPLAY = 5;
+/**
+ * Updates the weights output area to include information about the weights
+ * learned in a simple linear model.
+ * @param {List} weightsList list of objects with 'value':number and
+ *     'description':string
+ */
+ function updateWeightDescription(weightsList) {
+  const inspectionHeadlineElement =
+      document.getElementById('inspectionHeadline');
+  inspectionHeadlineElement.innerText =
+      `Top ${NUM_TOP_WEIGHTS_TO_DISPLAY} weights by magnitude`;
+  // Sort weights objects by descending absolute value.
+  weightsList.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+  var table = document.getElementById('myTable');
+  // Clear out table contents
+  table.innerHTML = '';
+  // Add new rows to table.
+  weightsList.forEach((weight, i) => {
+    if (i < NUM_TOP_WEIGHTS_TO_DISPLAY) {
+      let row = table.insertRow(-1);
+      let cell1 = row.insertCell(0);
+      let cell2 = row.insertCell(1);
+      if (weight.value < 0) {
+        cell2.setAttribute('class', 'negativeWeight');
+      } else {
+        cell2.setAttribute('class', 'positiveWeight');
+      }
+      cell1.innerHTML = weight.description;
+      cell2.innerHTML = weight.value.toFixed(4);
+    }
+  });
+};
+var model = {};
+
+ async function setup() {
+  const trainSimpleLinearRegression = document.getElementById('simple-mlr');
+  const trainNeuralNetworkLinearRegression1Hidden =
+      document.getElementById('nn-mlr-1hidden');
+  const trainNeuralNetworkLinearRegression2Hidden =
+      document.getElementById('nn-mlr-2hidden');
+
+  trainSimpleLinearRegression.addEventListener('click', async (e) => {
+    model = linearRegressionModel();
+    await run(model, 'linear', true);
+  }, false);
+
+  trainNeuralNetworkLinearRegression1Hidden.addEventListener(
+      'click', async () => {
+        model = multiLayerPerceptronRegressionModel1Hidden();
+        await run(model, 'oneHidden', false);
+      }, false);
+
+  trainNeuralNetworkLinearRegression2Hidden.addEventListener(
+      'click', async () => {
+        model = multiLayerPerceptronRegressionModel2Hidden();
+        await run(model, 'twoHidden', false);
+      }, false);
+};
+
+/**
+ * Given CSV data returns an array of arrays of numbers.
+ *
+ * @param {Array<Object>} data Downloaded data.
+ *
+ * @returns {Promise.Array<number[]>} Resolves to data with values parsed as floats.
+ */
+const parseCsv = async (data) => {
+  return new Promise(resolve => {
+    data = data.map((row) => {
+      return Object.keys(row).map(key => parseFloat(row[key]));
+    });
+    resolve(data);
+  });
+};
+
+/**
+ * Downloads and returns the csv.
+ *
+ * @param {string} filename Name of file to be loaded.
+ *
+ * @returns {Promise.Array<number[]>} Resolves to parsed csv data.
+ */
+const loadCsv = async (filename) => {
+  return new Promise(resolve => {
+    const url = `${BASE_URL}${filename}`;
+
+    console.log(`  * Downloading data from: ${url}`);
+    Papa.parse(url, {
+      download: true,
+      header: true,
+      complete: (results) => {
+        resolve(parseCsv(results['data']));
+      }
+    })
+  });
+};
+
+/** Helper class to handle loading training and test data. */
+class BostonHousingDataset {
+  constructor() {
+    // Arrays to hold the data.
+    this.trainFeatures = null;
+    this.trainTarget = null;
+    this.testFeatures = null;
+    this.testTarget = null;
+  }
+
+  get numFeatures() {
+    // If numFeatures is accessed before the data is loaded, raise an error.
+    if (this.trainFeatures == null) {
+      throw new Error('\'loadData()\' must be called before numFeatures')
+    }
+    return this.trainFeatures[0].length;
+  }
+
+  /** Loads training and test data. */
+  async loadData() {
+    [this.trainFeatures, this.trainTarget, this.testFeatures, this.testTarget] =
+        await Promise.all([
+          loadCsv(TRAIN_FEATURES_FN), loadCsv(TRAIN_TARGET_FN),
+          loadCsv(TEST_FEATURES_FN), loadCsv(TEST_TARGET_FN)
+        ]);
+
+    shuffle(this.trainFeatures, this.trainTarget);
+    shuffle(this.testFeatures, this.testTarget);
+  }
+}
+
+const featureDescriptions = [
+  'Crime rate', 'Land zone size', 'Industrial proportion', 'Next to river',
+  'Nitric oxide concentration', 'Number of rooms per house', 'Age of housing',
+  'Distance to commute', 'Distance to highway', 'Tax rate', 'School class size',
+  'School drop-out rate'
+];
+
+/**
+ * Shuffles data and target (maintaining alignment) using Fisher-Yates
+ * algorithm.flab
+ */
+function shuffle(data, target) {
+  let counter = data.length;
+  let temp = 0;
+  let index = 0;
+  while (counter > 0) {
+    index = (Math.random() * counter) | 0;
+    counter--;
+    // data:
+    temp = data[counter];
+    data[counter] = data[index];
+    data[index] = temp;
+    // target:
+    temp = target[counter];
+    target[counter] = target[index];
+    target[index] = temp;
+  }
+};
+
+const bostonData = new BostonHousingDataset();
+const tensors = {};
+// Convert loaded data into tensors and creates normalized versions of the
+// features.
+function arraysToTensors() {
+  tensors.rawTrainFeatures = tf.tensor2d(bostonData.trainFeatures);
+  tensors.trainTarget = tf.tensor2d(bostonData.trainTarget);
+  tensors.rawTestFeatures = tf.tensor2d(bostonData.testFeatures);
+  tensors.testTarget = tf.tensor2d(bostonData.testTarget);
+  // Normalize mean and standard deviation of data.
+  let {dataMean, dataStd} =
+      determineMeanAndStddev(tensors.rawTrainFeatures);
+
+  tensors.trainFeatures = normalizeTensor(
+      tensors.rawTrainFeatures, dataMean, dataStd);
+  tensors.testFeatures =
+      normalizeTensor(tensors.rawTestFeatures, dataMean, dataStd);
+};
+
+/**
+ * Builds and returns Linear Regression Model.
+ *
+ * @returns {tf.Sequential} The linear regression model.
+ */
+ function linearRegressionModel() {
+  const model = tf.sequential();
+  model.add(tf.layers.dense({inputShape: [bostonData.numFeatures], units: 1}));
+
+  model.summary();
+  return model;
+};
+
+/**
+ * Builds and returns Multi Layer Perceptron Regression Model
+ * with 1 hidden layer, each with 10 units activated by sigmoid.
+ *
+ * @returns {tf.Sequential} The multi layer perceptron regression model.
+ */
+ function multiLayerPerceptronRegressionModel1Hidden() {
+  const model = tf.sequential();
+  model.add(tf.layers.dense({
+    inputShape: [bostonData.numFeatures],
+    units: 50,
+    activation: 'sigmoid',
+    kernelInitializer: 'leCunNormal'
+  }));
+  model.add(tf.layers.dense({units: 1}));
+
+  model.summary();
+  return model;
+};
+
+/**
+ * Builds and returns Multi Layer Perceptron Regression Model
+ * with 2 hidden layers, each with 10 units activated by sigmoid.
+ *
+ * @returns {tf.Sequential} The multi layer perceptron regression model.
+ */
+ function multiLayerPerceptronRegressionModel2Hidden() {
+  const model = tf.sequential();
+  model.add(tf.layers.dense({
+    inputShape: [bostonData.numFeatures],
+    units: 50,
+    activation: 'sigmoid',
+    kernelInitializer: 'leCunNormal'
+  }));
+  model.add(tf.layers.dense(
+      {units: 50, activation: 'sigmoid', kernelInitializer: 'leCunNormal'}));
+  model.add(tf.layers.dense({units: 1}));
+
+  model.summary();
+  return model;
+};
+
+
+/**
+ * Describe the current linear weights for a human to read.
+ *
+ * @param {Array} kernel Array of floats of length 12.  One value per feature.
+ * @returns {List} List of objects, each with a string feature name, and value
+ *     feature weight.
+ */
+  function describeKernelElements(kernel) {
+  tf.util.assert(
+      kernel.length == 12,
+      `kernel must be a array of length 12, got ${kernel.length}`);
+  const outList = [];
+  for (let idx = 0; idx < kernel.length; idx++) {
+    outList.push({description: featureDescriptions[idx], value: kernel[idx]});
+  }
+  return outList;
+}
+
+/**
+ * Compiles `model` and trains it using the train data and runs model against
+ * test data. Issues a callback to update the UI after each epoch.
+ *
+ * @param {tf.Sequential} model Model to be trained.
+ * @param {boolean} weightsIllustration Whether to print info about the learned
+ *  weights.
+ */
+async function run(model, modelName, weightsIllustration) {
+  model.compile(
+      {optimizer: tf.train.sgd(LEARNING_RATE), loss: 'meanSquaredError'});
+
+  let trainLogs = [];
+  const container = document.querySelector(`#${modelName} .chart`);
+
+  updateStatus('Starting training process...');
+  await model.fit(tensors.trainFeatures, tensors.trainTarget, {
+    batchSize: BATCH_SIZE,
+    epochs: NUM_EPOCHS,
+    validationSplit: 0.2,
+    callbacks: {
+      onEpochEnd: async (epoch, logs) => {
+        await updateModelStatus(
+            `Epoch ${epoch + 1} of ${NUM_EPOCHS} completed.`, modelName);
+        trainLogs.push(logs);
+        tfvis.show.history(container, trainLogs, ['loss', 'val_loss'])
+
+        if (weightsIllustration) {
+          model.layers[0].getWeights()[0].data().then(kernelAsArr => {
+            const weightsList = describeKernelElements(kernelAsArr);
+            updateWeightDescription(weightsList);
+          });
+        }
+      }
+    }
+  });
+
+  updateStatus('Running on test data...');
+  const result = model.evaluate(
+      tensors.testFeatures, tensors.testTarget, {batchSize: BATCH_SIZE});
+  const testLoss = result.dataSync()[0];
+
+  const trainLoss = trainLogs[trainLogs.length - 1].loss;
+  const valLoss = trainLogs[trainLogs.length - 1].val_loss;
+  await updateModelStatus(
+      `Final train-set loss: ${trainLoss.toFixed(4)}\n` +
+          `Final validation-set loss: ${valLoss.toFixed(4)}\n` +
+          `Test-set loss: ${testLoss.toFixed(4)}`,
+      modelName);
+};
+
+function computeBaseline() {
+  const avgPrice = tensors.trainTarget.mean();
+  console.log(`Average price: ${avgPrice.dataSync()}`);
+  const baseline = tensors.testTarget.sub(avgPrice).square().mean();
+  console.log(`Baseline loss: ${baseline.dataSync()}`);
+  const baselineMsg = `Baseline loss (meanSquaredError) is ${
+      baseline.dataSync()[0].toFixed(2)}`;
+  updateBaselineStatus(baselineMsg);
+};
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await bostonData.loadData();
+  updateStatus('Data loaded, converting to tensors');
+  arraysToTensors();
+  updateStatus(
+      'Data is now available as tensors.\n' +
+      'Click a train button to begin.');
+  // TODO Explain what baseline loss is. How it is being computed in this
+  // Instance
+  updateBaselineStatus('Estimating baseline loss');
+  computeBaseline();
+  await setup();
+}, false);
+
+</script>
+ 
+</body>
+
+</html>
